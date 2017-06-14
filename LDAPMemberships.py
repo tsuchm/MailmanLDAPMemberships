@@ -51,6 +51,12 @@ def extend(list):
     ldap.ldaptls = False            # Use TLS, must be set to True or False
     ldap.ldapgroupattr = '' # if using groups, attribute that holds DN info.
                             # Omit or set to null string if not using groups.
+    ldap.ldapmailattr = 'mail' # if you use a special attribute to keep user's mail address,
+                               # set its name to this option.  Omit if you use the standard
+                               # attribute, `mail'.
+    ldap.ldapnameattr = 'gecos' # if you use a special attribute to keep user's name,
+                                # set its name to this option.  Omit if you use the standard
+                                # attribute.
     list._memberadaptor = ldap
 ##########
 
@@ -140,7 +146,11 @@ class LDAPMemberships(MemberAdaptor.MemberAdaptor):
         self.ldaprefresh = 360
         self.ldaptls = False
         self.ldapgroupattr = None
+        self.ldapmailattr = 'mail'
+        self.ldapnameattr = None
         self.ldapdigestsearch = None
+        self.ldapfilterfunction = None
+        self.ldappersistentmembers = []
 
     #
     # LDAP utility functions
@@ -155,10 +165,18 @@ class LDAPMemberships(MemberAdaptor.MemberAdaptor):
         return self.__ldap_conn
 
     def __loadmembers(self, result, is_digest=False):
+        if not is_digest:
+            for mail in self.ldappersistentmembers:
+                lce = mail.lower()
+                self.__member_map[lce] = mail
+                self.__regularmembers[lce] = mail
         for (dn, attrs) in result:
-            if attrs.has_key('mail'):
+            if self.ldapfilterfunction:
+                if self.ldapfilterfunction(dn, attrs):
+                    continue
+            if attrs.has_key(self.ldapmailattr):
                 # first mail is special
-                mail = attrs['mail'][0].strip()
+                mail = attrs[self.ldapmailattr][0].strip()
                 lce = mail.lower()
                 if is_digest:
                     self.__digestmembers[lce] = mail
@@ -167,13 +185,16 @@ class LDAPMemberships(MemberAdaptor.MemberAdaptor):
                 if DEBUG:
                     syslog('debug','adding members[lce] = %s' % mail)
                 # mail can have multiple values -- the_olo
-                for maddr in attrs['mail']:
+                for maddr in attrs[self.ldapmailattr]:
                     self.__member_map[maddr.strip().lower()] = mail
                 if attrs.has_key('mailalternateaddress'):
                     malts = attrs['mailalternateaddress']
                     for malt in malts:
                         self.__member_map[malt.lower()] = mail
-                if attrs.has_key('sn'):
+                if self.ldapnameattr and attrs.has_key(self.ldapnameattr):
+                    attrname = attrs[self.ldapnameattr][0]
+                    self.__member_names[lce] = attrname
+                elif attrs.has_key('sn'):
                     # if a surname is defined, use it
                     surname = attrs['sn'][0]
                     try:
@@ -221,47 +242,22 @@ class LDAPMemberships(MemberAdaptor.MemberAdaptor):
                 self.__ldap_load_members2(l, is_digest=True)
 
     def __ldap_load_members2(self, l, is_digest):
-        if self.ldapgroupattr:
-            # group attribute has been set. Let's get the DNs.
-            members = l.search_s(self.ldapbasedn, ldap.SCOPE_SUBTREE,
-                self.ldapsearch, [self.ldapgroupattr])
-            for (dn,attrs) in members:
-                if attrs.has_key(self.ldapgroupattr):
-                    groupdns = attrs[self.ldapgroupattr]
-                    if DEBUG:
-                        syslog('debug','regular groupdns = %s' % groupdns)
-                    for groupdn in groupdns:
-                        try:
-                            res2 = l.search_s(groupdn,
-                                              ldap.SCOPE_BASE,
-                                              '(objectClass=*)',
-                                              ['mail',
-                                               'mailalternateaddress',
-                                               'cn',
-                                               'givenname',
-                                               'sn',
-                                               'fullname',
-                                               'preferredname'
-                                              ]
-                                             )
-                            self.__loadmembers(res2,is_digest=is_digest)
-                        except ldap.NO_SUCH_OBJECT:
-                            syslog('warn',"can't process %s: no such object (accountDisabled?)" % groupdn)
-
-        else:
-            members = l.search_s(self.ldapbasedn,
-                                ldap.SCOPE_SUBTREE,
-                                self.ldapsearch,
-                                ['mail',
-                                 'mailalternateaddress',
-                                 'cn',
-                                 'givenname',
-                                 'sn',
-                                 'fullname',
-                                 'preferredname'
-                                ]
-                               )
-            self.__loadmembers(members,is_digest=is_digest)
+        members = []
+        try:
+            result = l.search_s(self.ldapbasedn, ldap.SCOPE_SUBTREE, self.ldapsearch)
+        except ldap.NO_SUCH_OBJECT:
+            result = []
+            syslog('warn',"No entry is found: %s" % self.ldapsearch)
+        for (dn,attrs) in result:
+            if self.ldapgroupattr and attrs.has_key(self.ldapgroupattr):
+                for groupdn in attrs[self.ldapgroupattr]:
+                    try:
+                        members.extend(l.search_s(groupdn, ldap.SCOPE_BASE, '(objectClass=*)'))
+                    except ldap.NO_SUCH_OBJECT:
+                        syslog('warn',"No such object: %s" % groupdn)
+            else:
+                members.append((dn, attrs))
+        self.__loadmembers(members, is_digest=is_digest)
 
     def __ldap_get_regular_members(self):
         self.__ldap_load_members()
