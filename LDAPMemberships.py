@@ -57,6 +57,8 @@ def extend(list):
     ldap.ldapnameattr = 'gecos' # if you use a special attribute to keep user's name,
                                 # set its name to this option.  Omit if you use the standard
                                 # attribute.
+    ldap.ldapfilterfunction = None
+    ldap.ldappersistentmembers = ['foo@example.net']
     list._memberadaptor = ldap
 ##########
 
